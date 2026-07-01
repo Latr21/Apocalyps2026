@@ -1,0 +1,51 @@
+# ============================================================================
+# IPSSI_APOCAL_KIT — CI de sécurité (perturbation J3 "Conformité / Éthique")
+# ----------------------------------------------------------------------------
+# Exécute automatiquement, à chaque push et pull request, la suite de tests
+# adversariaux de prompt injection (tests/test_prompt_injection.py).
+#
+# Ce workflow est volontairement indépendant de ci.yml : il ne touche à
+# aucune fonctionnalité métier, ne nécessite pas de base de données (les
+# tests n'utilisent que le client LLM mock + le validateur de quiz, en pur
+# Python), et n'installe que les dépendances déjà utilisées par le backend.
+# ============================================================================
+
+name: Security
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  prompt-injection-tests:
+    name: Tests adversariaux de prompt injection
+    runs-on: ubuntu-latest
+
+    env:
+      DJANGO_SETTINGS_MODULE: apocal.settings
+      LLM_BACKEND: mock # aucun appel réseau/API en CI
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements-dev.txt
+
+      - name: Run security tests (prompt injection)
+        # -p no:django : ces tests n'ont pas besoin des fixtures/DB de
+        # pytest-django (ils appellent django.setup() eux-mêmes dans
+        # conftest.py) ; ça évite l'auto-détection de projet Django de
+        # pytest-django, qui cherche un manage.py à la racine du repo.
+        run: pytest tests/ -v -p no:django
