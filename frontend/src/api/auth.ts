@@ -126,3 +126,37 @@ export async function deleteAccount(password: string): Promise<void> {
   await api.delete('/accounts/profile/', { data: { password } });
   clearToken();
 }
+
+// ---------------------------------------------------------------------------
+// Export RGPD (J3-bis, article 15 — droit d'accès/portabilité)
+// ---------------------------------------------------------------------------
+
+/**
+ * Exporte toutes les données personnelles et déclenche le téléchargement du
+ * fichier dans le navigateur.
+ *
+ * [Note pédagogique] `responseType: 'blob'` : la réponse est un fichier
+ * (JSON ou archive ZIP), pas du JSON à parser par axios. On crée une URL
+ * objet temporaire puis on simule un clic sur un lien — c'est la seule façon
+ * de déclencher un téléchargement natif du navigateur depuis du JS.
+ */
+export async function exportMyData(format: 'json' | 'csv' = 'json'): Promise<void> {
+  const response = await api.get('/accounts/me/export/', {
+    params: { export_format: format },
+    responseType: 'blob',
+  });
+
+  const disposition = response.headers['content-disposition'] as string | undefined;
+  const filename =
+    disposition?.match(/filename="([^"]+)"/)?.[1] ??
+    `edututor_export.${format === 'csv' ? 'zip' : 'json'}`;
+
+  const url = URL.createObjectURL(response.data as Blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}

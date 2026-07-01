@@ -11,11 +11,15 @@ Endpoints d'authentification (Lot 3 : email-identifiant + validation + reset).
     POST /api/accounts/password-reset/confirm/   — définir le nouveau mot de passe
 """
 
+import hashlib
+import json
 import logging
 
 from django.contrib.auth import login as django_login
 from django.contrib.auth import logout as django_logout
 from django.contrib.auth.models import User
+from django.http import HttpResponse
+from django.utils import timezone
 from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import status
 from rest_framework.authtoken.models import Token
@@ -23,8 +27,9 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from .data_export import build_export_payload, build_zip_archive, client_ip
 from .emails import EmailError, send_password_reset_email, send_verification_email
-from .models import get_or_create_profile
+from .models import DataRequest, get_or_create_profile
 from .serializers import (
     ChangePasswordSerializer,
     DeleteAccountSerializer,
@@ -268,8 +273,8 @@ class ProfileView(APIView):
     )
     def delete(self, request):
         # Suppression DURE (hard delete) : confirmée par le mot de passe.
-        # [TODO J3-bis RGPD] Avant de supprimer, proposer un export des données
-        #   personnelles (droit à la portabilité). Voir Lot futur "export RGPD".
+        # Le droit à la portabilité est couvert par ExportMyDataView (J3-bis) ;
+        # le frontend propose l'export AVANT ce bouton de suppression.
         serializer = DeleteAccountSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
 
@@ -303,3 +308,66 @@ class ChangePasswordView(APIView):
         Token.objects.filter(user=user).delete()
         token = Token.objects.create(user=user)
         return Response({"detail": "Mot de passe modifié.", "token": token.key})
+
+
+# ---------------------------------------------------------------------------
+# Export RGPD (perturbation J3-bis — article 15 : droit d'accès/portabilité)
+# ---------------------------------------------------------------------------
+
+
+class ExportMyDataView(APIView):
+    """Export de toutes les données personnelles de l'utilisateur connecté.
+
+    GET /api/accounts/me/export/                     — fichier JSON (défaut)
+    GET /api/accounts/me/export/?export_format=csv    — archive ZIP (1 CSV par catégorie)
+
+    [Note pédagogique] Le paramètre de requête s'appelle `export_format` et
+    NON `format` : DRF réserve `?format=` pour sa propre négociation de
+    contenu (content negotiation) — l'utiliser ici entrerait en conflit et
+    ferait échouer la résolution d'URL avant même d'atteindre cette vue.
+
+    Ne renvoie JAMAIS les données d'un autre utilisateur : le payload part de
+    `request.user` uniquement (voir data_export.build_export_payload). Chaque
+    appel crée une `DataRequest` (trace d'audit + hash du fichier livré).
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        responses={200: OpenApiResponse(description="Export RGPD (fichier JSON ou archive ZIP)")}
+    )
+    def get(self, request):
+        export_format = request.query_params.get("export_format", "json").lower()
+        if export_format not in (DataRequest.Format.JSON, DataRequest.Format.CSV):
+            return Response(
+                {"detail": "Format invalide. Valeurs autorisées : json, csv."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        data_request = DataRequest.objects.create(
+            user=request.user,
+            status=DataRequest.Status.PROCESSING,
+            format=export_format,
+            request_ip=client_ip(request),
+            user_agent=request.META.get("HTTP_USER_AGENT", "")[:500],
+        )
+
+        payload = build_export_payload(request.user)
+
+        if export_format == DataRequest.Format.CSV:
+            content = build_zip_archive(payload)
+            content_type = "application/zip"
+            filename = f"edututor_export_{request.user.id}.zip"
+        else:
+            content = json.dumps(payload, indent=2, ensure_ascii=False, default=str).encode("utf-8")
+            content_type = "application/json"
+            filename = f"edututor_export_{request.user.id}.json"
+
+        data_request.export_hash = hashlib.sha256(content).hexdigest()
+        data_request.status = DataRequest.Status.COMPLETED
+        data_request.response_at = timezone.now()
+        data_request.save(update_fields=["export_hash", "status", "response_at"])
+
+        response = HttpResponse(content, content_type=content_type)
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return response

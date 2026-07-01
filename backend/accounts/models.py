@@ -42,3 +42,57 @@ def get_or_create_profile(user) -> Profile:
     """
     profile, _ = Profile.objects.get_or_create(user=user)
     return profile
+
+
+class DataRequest(models.Model):
+    """Trace d'audit d'un export RGPD (article 15 — droit d'accès/portabilité).
+
+    [Note pédagogique — perturbation J3-bis] Chaque appel à
+    `GET /api/accounts/me/export/` crée une ligne ici : preuve qu'un export a
+    bien été remis à l'utilisateur, avec le hash du fichier livré (intégrité)
+    et le contexte de la requête (IP, user-agent). L'export lui-même est
+    calculé à la volée (voir `data_export.py`) : ce modèle ne stocke QUE la
+    trace, jamais les données personnelles exportées.
+    """
+
+    class Status(models.TextChoices):
+        RECEIVED = "received", "Reçue"
+        PROCESSING = "processing", "En cours"
+        COMPLETED = "completed", "Terminée"
+
+    class Format(models.TextChoices):
+        JSON = "json", "JSON"
+        CSV = "csv", "CSV (archive ZIP)"
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="data_requests",
+    )
+    requested_at = models.DateTimeField(auto_now_add=True)
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.RECEIVED,
+    )
+    response_at = models.DateTimeField(null=True, blank=True)
+    export_hash = models.CharField(
+        max_length=64,
+        blank=True,
+        help_text="SHA-256 (hex) du fichier exporté — preuve d'intégrité.",
+    )
+    format = models.CharField(
+        max_length=10,
+        choices=Format.choices,
+        default=Format.JSON,
+    )
+    request_ip = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.CharField(max_length=500, blank=True)
+
+    class Meta:
+        ordering = ["-requested_at"]
+        verbose_name = "Demande d'export RGPD"
+        verbose_name_plural = "Demandes d'export RGPD"
+
+    def __str__(self) -> str:
+        return f"Export {self.format} — {self.user} ({self.status})"
